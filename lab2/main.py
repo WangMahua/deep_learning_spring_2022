@@ -52,6 +52,7 @@ def show_result(x,y,pred_y):
 if __name__ == "__main__":
     # generate data
     raw_data, raw_data_label =  generate_linear()
+    #raw_data, raw_data_label =  generate_XOR_easy()
 
     # neural network
     nn = nn_model()

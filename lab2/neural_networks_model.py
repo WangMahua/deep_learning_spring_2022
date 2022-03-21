@@ -7,12 +7,14 @@ class nn_model():
     def __init__(self):
         self.input_size = 2
         self.output_size = 1
+        self.hidden_layer1_size = 2
+        self.hidden_layer2_size = 2
         self.epochs = 10000
 
         # initialize weight value
-        self.w1 = np.random.rand(self.input_size,self.input_size)
-        self.w2 = np.random.rand(self.input_size,self.input_size)
-        self.w3 = np.random.rand(self.input_size,self.output_size)
+        self.w1 = np.random.rand(self.input_size,self.hidden_layer1_size)
+        self.w2 = np.random.rand(self.hidden_layer1_size,self.hidden_layer2_size)
+        self.w3 = np.random.rand(self.hidden_layer2_size,self.output_size)
 
         # record mid layer
         self.input_data = []
@@ -23,9 +25,10 @@ class nn_model():
 
         # record truth data
         self.truth_data = []
+        self.loss_error_curve = []
 
         #SGD
-        self.learning_rate = 0.05
+        self.learning_rate = 0.01 # leaner : 0.01 ; XOR : 0.8 
         self.grad_w1 = []
         self.grad_w2 = []
         self.grad_w3 = []
@@ -87,9 +90,15 @@ class nn_model():
                 self.output_label[i] = 0 
             if y[i] == self.output_label[i]:
                 correct_task = correct_task + 1
-        print(correct_task)
         accuracy = correct_task / len(y) * 100
-        print("accurancy : {0}%, loss : {1:.6f}".format(accuracy, self.loss_function(y, pred_y)))
+        print("accuracy : {0}%, loss : {1:.6f}".format(accuracy, self.loss_function(y, pred_y))) 
+
+    def show_learning_curve_result(self):
+        plt.title('Learning curve',fontsize = 18)
+        plt.xlabel('epoch')
+        plt.ylabel('loss error')
+        plt.plot(range(1,len(self.loss_error_curve)+1),self.loss_error_curve)
+        plt.show()
 
     def process(self,origin_data,label):
         self.input_data = origin_data
@@ -98,12 +107,14 @@ class nn_model():
         self.output_label = np.ones(len(origin_data))
         for i in range(self.epochs):
             loss_error = self.loss_function(label,self.output_value)
+            self.loss_error_curve.append(loss_error)
             if  loss_error > 0.01 : 
                 self.forward_pass(origin_data)
                 self.back_propagation()
 
             if self.epochs % 500 == 0:
                 self.evaluate(label,self.output_value)
+        self.show_learning_curve_result()
         return self.output_label
     
 
