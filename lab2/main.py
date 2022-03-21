@@ -58,5 +58,5 @@ if __name__ == "__main__":
     pred_label = nn.process(raw_data,raw_data_label)
 
     # plot
-    show_result(data,data_label,data_label)
+    show_result(raw_data,raw_data_label,pred_label)
     
