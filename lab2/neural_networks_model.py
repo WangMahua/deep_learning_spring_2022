@@ -7,8 +7,8 @@ class nn_model():
     def __init__(self):
         self.input_size = 2
         self.output_size = 1
-        self.hidden_layer1_size = 2
-        self.hidden_layer2_size = 2
+        self.hidden_layer1_size = 5
+        self.hidden_layer2_size = 5
         self.epochs = 10000
 
         # initialize weight value
@@ -76,8 +76,19 @@ class nn_model():
         self.w2 = self.w2 - self.learning_rate * self.grad_w2
         self.w3 = self.w3 - self.learning_rate * self.grad_w3
 
+    def update_grad_without_activate_function(self):
+        self.grad_3 = (self.output_value)*(2*(self.output_value-self.truth_data))  
+        self.grad_w3 = np.dot(self.layer2_data.T, self.grad_3)
+
+        self.grad_2 = (self.layer2_data)*np.dot(self.grad_3,self.w3.T)
+        self.grad_w2 = np.dot(self.layer1_data.T, self.grad_2)
+
+        self.grad_1 = (self.layer1_data)*np.dot(self.grad_2,self.w2.T)
+        self.grad_w1 = np.dot(self.input_data.T, self.grad_1)
+
     def back_propagation(self): 
         self.update_grad()
+        #self.update_grad_without_activate_function()
         self.update_weight()
 
     def evaluate(self,y,pred_y):
@@ -114,7 +125,7 @@ class nn_model():
 
             if self.epochs % 500 == 0:
                 self.evaluate(label,self.output_value)
-        self.show_learning_curve_result()
+        #self.show_learning_curve_result()
         return self.output_label
     
 
