@@ -17,7 +17,7 @@ from PIL import Image
 from dataset import bair_robot_pushing_dataset
 from models.lstm import gaussian_lstm, lstm
 from models.vgg_64 import vgg_decoder, vgg_encoder
-from utils import init_weights, kl_criterion, eval_seq, plot_rec,plot_pred,pred,finn_eval_seq
+from utils import init_weights, kl_criterion, eval_seq, plot_rec,plot_pred,pred,finn_eval_seq,mse_metric
 
 torch.backends.cudnn.benchmark = True
 
@@ -31,11 +31,11 @@ def parse_args():
     parser.add_argument('--data_root', default='./data/processed_data', help='root directory for data')
     parser.add_argument('--optimizer', default='adam', help='optimizer to train with')
     parser.add_argument('--niter', type=int, default=300, help='number of epochs to train for')
-    parser.add_argument('--epoch_size', type=int, default=20, help='epoch size')
+    parser.add_argument('--epoch_size', type=int, default=200, help='epoch size')
     parser.add_argument('--tfr', type=float, default=1.0, help='teacher forcing ratio (0 ~ 1)')
-    parser.add_argument('--tfr_start_decay_epoch', type=int, default=0, help='The epoch that teacher forcing ratio become decreasing')
-    parser.add_argument('--tfr_decay_step', type=float, default=0, help='The decay step size of teacher forcing ratio (0 ~ 1)')
-    parser.add_argument('--tfr_lower_bound', type=float, default=0, help='The lower bound of teacher forcing ratio for scheduling teacher forcing ratio (0 ~ 1)')
+    parser.add_argument('--tfr_start_decay_epoch', type=int, default=100, help='The epoch that teacher forcing ratio become decreasing')
+    parser.add_argument('--tfr_decay_step', type=float, default=0.99, help='The decay step size of teacher forcing ratio (0 ~ 1)')
+    parser.add_argument('--tfr_lower_bound', type=float, default=0.5, help='The lower bound of teacher forcing ratio for scheduling teacher forcing ratio (0 ~ 1)')
     parser.add_argument('--kl_anneal_cyclical', default=True, action='store_true', help='use cyclical mode')
     parser.add_argument('--kl_anneal_ratio', type=float, default=2, help='The decay ratio of kl annealing')
     parser.add_argument('--kl_anneal_cycle', type=int, default=3, help='The number of cycle for kl annealing (if use cyclical mode)')
@@ -77,6 +77,7 @@ def train(x, cond, modules, optimizer, kl_anneal, args):
     # te_em = nn.Embedding(4, 7)
     # tense_embedding = te_em(cond.view(-1, 1))
     #print(h_seq[0][0].size())
+
     for i in range(1, args.n_past + args.n_future):
         h_target = h_seq[i][0]
         #print(h_seq[i][0].size())  # [10,128]
@@ -87,10 +88,24 @@ def train(x, cond, modules, optimizer, kl_anneal, args):
         else:
             h = h_seq[i-1][0]
 
+        if i > 1:
+            previous_img = x_pred
+            pr_latent = modules['encoder'](previous_img)
+            h_no_teacher = pr_latent[0]
+        else:
+            h_no_teacher = h    
+
+
         c = cond[:, i, :].float()
 
         z_t, mu, logvar = modules['posterior'](h_target)
-        h_pred = modules['frame_predictor'](torch.cat([h, z_t,c], 1))
+
+        if use_teacher_forcing:
+            h_pred = modules['frame_predictor'](torch.cat([h, z_t, c], 1))
+        else:
+            print("without teacher")
+            h_pred = modules['frame_predictor'](torch.cat([h_no_teacher, z_t, c], 1))
+            
         x_pred = modules['decoder']([h_pred, skip])
         mse += mse_criterion(x_pred, x[:,i])
         kld += kl_criterion(mu, logvar,args)
@@ -112,7 +127,6 @@ class kl_annealing():
         self.beta = 0.0
         self.count = 0
 
-    
     def update(self):
         self.count += 1
         if self.mode == 'cyclical' :
@@ -125,7 +139,7 @@ class kl_annealing():
             self.beta = 1.0 if self.beta > 1.0 else self.beta 
     
     def get_beta(self):
-        self.update()
+        #self.update()
         return self.beta
 
 
@@ -274,11 +288,12 @@ def main():
             epoch_kld += kld
         
         kl_anneal.update()
+        print(kl_anneal.get_beta())
 
-        if epoch >= args.tfr_start_decay_epoch:
+        if epoch >= args.tfr_start_decay_epoch and args.tfr>=args.tfr_lower_bound:
             ### Update teacher forcing ratio ###
-            args.tfr = 1. - (1./(args.epoch_size-1)) * (epoch-1) # from 1.0 to 0.0
-
+            args.tfr = 1. - float((1./(args.epoch_size-1)) * (epoch-1) * args.tfr_decay_step) # from 1.0 to 0.0
+        #print(args.tfr)
 
         progress.update(1)
         with open('./{}/train_record.txt'.format(args.log_dir), 'a') as train_record:
@@ -307,7 +322,13 @@ def main():
                 tt = (np.transpose(pred_seq_[1,1,:,:], (1, 2, 0)) + 1) / 2.0 * 255.0
                 data = Image.fromarray(np.uint8(tt))
                 data.save('./psnr_gen/psnr:{now_epoch}.png'.format(now_epoch = epoch))
-                #validate_seq = validate_seq.cpu().numpy()
+                
+                validate_seq_ = np.array(validate_seq.cpu().numpy())
+                tt = (np.transpose(validate_seq_[1,1,:,:], (1, 2, 0)) + 1) / 2.0 * 255.0
+                data = Image.fromarray(np.uint8(tt))
+                data.save('./psnr_gen/psnr:{now_epoch}_gt.png'.format(now_epoch = epoch))
+
+                
                 _, _, psnr = finn_eval_seq(validate_seq[args.n_past:], pred_seq[args.n_past:])
                 psnr_list.append(psnr)
                 
