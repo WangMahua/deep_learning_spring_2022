@@ -27,8 +27,8 @@ def eval_seq(gt, pred):
     mse = np.zeros((bs, T))
     for i in range(bs):
         for t in range(T):
-            origin = gt[t][i]
-            predict = pred[t][i]
+            origin = gt[t][i].cpu().numpy()
+            predict = pred[t][i].cpu().numpy()
             for c in range(origin.shape[0]):
                 ssim[i, t] += ssim_metric(origin[c], predict[c]) 
                 psnr[i, t] += psnr_metric(origin[c], predict[c])
@@ -39,37 +39,39 @@ def eval_seq(gt, pred):
     return mse, ssim, psnr
 
 def mse_metric(x1, x2):
-    err = np.sum((x1 - x2) ** 2)
+    x1 = x1.cpu().numpy()
+    x2 = x2.cpu().numpy()
+    dif_ = x1 - x2
+    err = np.sum(dif_ ** 2)
     err /= float(x1.shape[0] * x1.shape[1] * x1.shape[2])
     return err
 
 # ssim function used in Babaeizadeh et al. (2017), Fin et al. (2016), etc.
 def finn_eval_seq(gt, pred):
-    T = len(pred)
-    bs = pred[0].shape[0]
+    T = len(gt)
+    bs = gt[0].shape[0]
     ssim = np.zeros((bs, T))
     psnr = np.zeros((bs, T))
     mse = np.zeros((bs, T))
     for i in range(bs):
         for t in range(T):
-            origin = gt[t][i].cpu().numpy()
-            predict = pred[t][i]
-            # origin = gt[t][i].detach().cpu().numpy()
-            # predict = pred[t][i].detach().cpu().numpy()
-            for c in range(origin.shape[0]):
-                res = finn_ssim(origin[c], predict[c]).mean()
+            for c in range(gt[t][i].shape[0]):
+
+                res = finn_ssim(gt[t][i][c], pred[t][i][c]).mean()
                 if math.isnan(res):
                     ssim[i, t] += -1
                 else:
                     ssim[i, t] += res
-                psnr[i, t] += finn_psnr(origin[c], predict[c])
-            ssim[i, t] /= origin.shape[0]
-            psnr[i, t] /= origin.shape[0]
-            mse[i, t] = mse_metric(origin, predict)
+                psnr[i, t] += finn_psnr(gt[t][i][c], pred[t][i][c])
+            ssim[i, t] /= gt[t][i].shape[0]
+            psnr[i, t] /= gt[t][i].shape[0]
+            mse[i, t] = mse_metric(gt[t][i], pred[t][i])
 
     return mse, ssim, psnr
 
 def finn_psnr(x, y, data_range=1.):
+    x = x.cpu().data.numpy()
+    y = y.cpu().data.numpy()
     mse = ((x - y)**2).mean()
     return 20 * math.log10(data_range) - 10 * math.log10(mse)
 
@@ -79,7 +81,8 @@ def fspecial_gauss(size, sigma):
     return g / g.sum()
 
 def finn_ssim(img1, img2, data_range=1., cs_map=False):
-    #img1 = img1.numpy()
+    img1 = img1.cpu().numpy()
+    img2 = img2.cpu().numpy()
     img1 = img1.astype(np.float64)
     img2 = img2.astype(np.float64)
 
@@ -226,31 +229,33 @@ def pred(x, cond, modules, args, device):
     modules['posterior'].hidden = modules['posterior'].init_hidden()
 
 
-    x_in = x[:,0]
-    with torch.no_grad():
-        h_seq = [ modules['encoder'](x[:,i]) for i in range(args.n_past + args.n_future)] # x : [10,12,3,64,64] h_seq : [12,10,128]
+    h_seq = [ modules['encoder'](x[:,i]) for i in range(args.n_past + args.n_future)] # x : [10,12,3,64,64] h_seq : [12,10,128]
+    x_in = x[:, 0]
+    for i in range(1, args.n_eval):
+        c = cond[:, i, :].float()
+        h = modules['encoder'](x_in)
 
-        # te_em = nn.Embedding(4, 7)
-        # tense_embedding = te_em(cond.view(-1, 1))
-        #print(h_seq[0][0].size())
-        for i in range(1, args.n_past + args.n_future):
-            h_target = h_seq[i][0]
-            #print(h_seq[i][0].size())  # [10,128]
+        if args.last_frame_skip or i < args.n_past:   
+            h, skip = h
+        else:
+            h, _ = h
+        h = h.detach()
+        if i < args.n_past:
+            h_target = modules['encoder'](x[:,i])[0].detach()
+            _, z_t, _ = modules['posterior'](h_target)
+        else:
+            z_t = torch.cuda.FloatTensor(args.batch_size, args.z_dim).normal_() 
+        
+        if i < args.n_past:
+            modules['frame_predictor'](torch.cat([h, z_t, c], 1))
+            x_in = x[:, i]
+        else:
+            h = modules['frame_predictor'](torch.cat([h, z_t, c], 1)).detach()
+            x_in = modules['decoder']([h, skip]).detach()
+            gen_seq.append(x_in.data.cpu().numpy())
+  
+    gen_seq = torch.tensor(np.array(gen_seq))
+    #print('gen_seq', gen_seq.dtype, gen_seq.shape)
+    gen_seq = gen_seq.permute(1,0,2,3,4)
 
-            if args.last_frame_skip or i < args.n_past:	
-                h = h_seq[i-1][0] 
-                skip = h_seq[i-1][1]
-            else:
-                h = h_seq[i-1][0]
-
-            c = cond[:, i, :].float()
-
-            z_t, mu, logvar = modules['posterior'](h_target)
-            h_pred = modules['frame_predictor'](torch.cat([h, z_t,c], 1))
-            x_pred = modules['decoder']([h_pred, skip])
-            
-            if i > 1 :
-                gen_seq.append(x_pred.data.cpu().numpy())
-
-    
     return gen_seq

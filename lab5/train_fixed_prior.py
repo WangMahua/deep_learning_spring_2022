@@ -12,6 +12,7 @@ from torch.autograd import Variable
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+import matplotlib.pyplot as plt
 from PIL import Image
 
 from dataset import bair_robot_pushing_dataset
@@ -23,19 +24,19 @@ torch.backends.cudnn.benchmark = True
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--lr', default=0.002, type=float, help='learning rate')
+    parser.add_argument('--lr', default=0.001, type=float, help='learning rate')
     parser.add_argument('--beta1', default=0.9, type=float, help='momentum term for adam')
-    parser.add_argument('--batch_size', default=10, type=int, help='batch size')
+    parser.add_argument('--batch_size', default=9, type=int, help='batch size')
     parser.add_argument('--log_dir', default='./logs/fp', help='base directory to save logs')
     parser.add_argument('--model_dir', default='', help='base directory to save logs')
     parser.add_argument('--data_root', default='./data/processed_data', help='root directory for data')
     parser.add_argument('--optimizer', default='adam', help='optimizer to train with')
     parser.add_argument('--niter', type=int, default=300, help='number of epochs to train for')
-    parser.add_argument('--epoch_size', type=int, default=200, help='epoch size')
+    parser.add_argument('--epoch_size', type=int, default=600, help='epoch size')
     parser.add_argument('--tfr', type=float, default=1.0, help='teacher forcing ratio (0 ~ 1)')
-    parser.add_argument('--tfr_start_decay_epoch', type=int, default=100, help='The epoch that teacher forcing ratio become decreasing')
-    parser.add_argument('--tfr_decay_step', type=float, default=0.99, help='The decay step size of teacher forcing ratio (0 ~ 1)')
-    parser.add_argument('--tfr_lower_bound', type=float, default=0.5, help='The lower bound of teacher forcing ratio for scheduling teacher forcing ratio (0 ~ 1)')
+    parser.add_argument('--tfr_start_decay_epoch', type=int, default=50, help='The epoch that teacher forcing ratio become decreasing')
+    parser.add_argument('--tfr_decay_step', type=float, default=0.005, help='The decay step size of teacher forcing ratio (0 ~ 1)')
+    parser.add_argument('--tfr_lower_bound', type=float, default=0.0, help='The lower bound of teacher forcing ratio for scheduling teacher forcing ratio (0 ~ 1)')
     parser.add_argument('--kl_anneal_cyclical', default=True, action='store_true', help='use cyclical mode')
     parser.add_argument('--kl_anneal_ratio', type=float, default=2, help='The decay ratio of kl annealing')
     parser.add_argument('--kl_anneal_cycle', type=int, default=3, help='The number of cycle for kl annealing (if use cyclical mode)')
@@ -73,14 +74,8 @@ def train(x, cond, modules, optimizer, kl_anneal, args):
     use_teacher_forcing = True if random.random() < args.tfr else False
 
     h_seq = [ modules['encoder'](x[:,i]) for i in range(args.n_past + args.n_future)] # x : [10,12,3,64,64] h_seq : [12,10,128]
-
-    # te_em = nn.Embedding(4, 7)
-    # tense_embedding = te_em(cond.view(-1, 1))
-    #print(h_seq[0][0].size())
-
     for i in range(1, args.n_past + args.n_future):
         h_target = h_seq[i][0]
-        #print(h_seq[i][0].size())  # [10,128]
 
         if args.last_frame_skip or i < args.n_past:	
             h = h_seq[i-1][0] 
@@ -95,7 +90,6 @@ def train(x, cond, modules, optimizer, kl_anneal, args):
         else:
             h_no_teacher = h    
 
-
         c = cond[:, i, :].float()
 
         z_t, mu, logvar = modules['posterior'](h_target)
@@ -103,7 +97,6 @@ def train(x, cond, modules, optimizer, kl_anneal, args):
         if use_teacher_forcing:
             h_pred = modules['frame_predictor'](torch.cat([h, z_t, c], 1))
         else:
-            print("without teacher")
             h_pred = modules['frame_predictor'](torch.cat([h_no_teacher, z_t, c], 1))
             
         x_pred = modules['decoder']([h_pred, skip])
@@ -120,7 +113,7 @@ def train(x, cond, modules, optimizer, kl_anneal, args):
 class kl_annealing():
     def __init__(self, args):
         super().__init__()
-        self.total_epochs = args.epoch_size
+        self.total_epochs = args.niter
         self.kl_anneal_cycle = args.kl_anneal_cycle
         self.beta_grad = (self.kl_anneal_cycle*2)/self.total_epochs
         self.mode = 'cyclical' if args.kl_anneal_cyclical else 'monotonic'
@@ -142,9 +135,50 @@ class kl_annealing():
         #self.update()
         return self.beta
 
+def plot_result(KLD, MSE, LOSS, PSNR, BETA, TFR, epoch, args):
+
+    fig = plt.figure()
+    ratio = plt.subplot()
+    value = ratio.twinx()
+
+    KLD = np.array(KLD)
+    KLD = np.where(KLD>1,1,KLD)
+    MSE = np.array(MSE)
+    MSE = np.where(MSE>1,1,MSE)
+    LOSS = np.array(LOSS)
+    LOSS = np.where(LOSS>1,1,LOSS)
+
+    l1, = ratio.plot(BETA, color='red', linestyle='dashed')
+
+    l2, = ratio.plot(TFR, color='orange', linestyle='dashed')
+
+    l3, = ratio.plot(KLD, color='blue')
+
+    l4, = ratio.plot(MSE, color='green')
+
+    l5, = ratio.plot(LOSS, color='cyan')
+
+    x_sparse = np.linspace(0, epoch, np.size(PSNR))
+    l6 = value.scatter(x_sparse, PSNR, color='yellow')
+
+    with open('./plot_record.txt', 'w') as result:
+                    result.write('kld: {}\n'.format(KLD))
+                    result.write('\nmse: {}\n'.format(MSE))
+                    result.write('\nloss: {}\n'.format(LOSS))
+                    result.write('\npsnr: {}\n'.format(PSNR))
+                    result.write('\nbeta: {}\n'.format(BETA))
+                    result.write('\ntfr: {}\n'.format(TFR))
+
+    ratio.set_xlabel('Iterations')
+    ratio.set_ylabel("ratio/weight")
+    value.set_ylabel('Loss')
+    plt.title("Training loss / ratio curve")
+    plt.legend([l1, l2, l3, l4, l5, l6], ["kl_beta", "tfr", "KLD", "mse", "loss", "PSNR"])
+    plt.savefig('plot_{a}.png'.format(a = epoch))
 
 
 def main():
+    KLD_plot, MSE_plot, LOSS_plot, PSNR_plot, BETA_plot, TFR_plot =[],[],[],[],[],[]
     args = parse_args()
     if args.cuda:
         assert torch.cuda.is_available(), 'CUDA is not available.'
@@ -169,9 +203,10 @@ def main():
         args.log_dir = '%s/continued' % args.log_dir
         start_epoch = saved_model['last_epoch']
     else:
-        name = 'rnn_size=%d-predictor-posterior-rnn_layers=%d-%d-n_past=%d-n_future=%d-lr=%.4f-g_dim=%d-z_dim=%d-last_frame_skip=%s-beta=%.7f'\
-            % (args.rnn_size, args.predictor_rnn_layers, args.posterior_rnn_layers, args.n_past, args.n_future, args.lr, args.g_dim, args.z_dim, args.last_frame_skip, args.beta)
-
+        name = 'rnn_size=%d-predictor-posterior-rnn_layers=%d-%d-n_past=%d-n_future=%d-lr=%.4f-g_dim=%d-z_dim=%d-last_frame_skip=%s-beta=%.7f-niter=%d-epoch_size=%d'\
+            % (args.rnn_size, args.predictor_rnn_layers, args.posterior_rnn_layers, args.n_past, args.n_future, args.lr, args.g_dim, args.z_dim, args.last_frame_skip, args.beta,args.niter,args.niter)
+        text = "-cyclical" if args.kl_anneal_cyclical else "-monotonic"
+        name = name + text
         args.log_dir = '%s/%s' % (args.log_dir, name)
         niter = args.niter
         start_epoch = 0
@@ -288,12 +323,14 @@ def main():
             epoch_kld += kld
         
         kl_anneal.update()
-        print(kl_anneal.get_beta())
+        KLD_plot.append(kld)
+        MSE_plot.append(mse)
+        LOSS_plot.append(loss)
+        BETA_plot.append(kl_anneal.get_beta())
+        TFR_plot.append(args.tfr)
 
         if epoch >= args.tfr_start_decay_epoch and args.tfr>=args.tfr_lower_bound:
-            ### Update teacher forcing ratio ###
-            args.tfr = 1. - float((1./(args.epoch_size-1)) * (epoch-1) * args.tfr_decay_step) # from 1.0 to 0.0
-        #print(args.tfr)
+            args.tfr = args.tfr - args.tfr_decay_step
 
         progress.update(1)
         with open('./{}/train_record.txt'.format(args.log_dir), 'a') as train_record:
@@ -318,22 +355,23 @@ def main():
 
                 pred_seq = pred(validate_seq, validate_cond, modules, args, device)
                 
-                pred_seq_ = np.array(pred_seq)
-                tt = (np.transpose(pred_seq_[1,1,:,:], (1, 2, 0)) + 1) / 2.0 * 255.0
-                data = Image.fromarray(np.uint8(tt))
-                data.save('./psnr_gen/psnr:{now_epoch}.png'.format(now_epoch = epoch))
+                # pred_seq_ = np.array(pred_seq)
+                # tt = (np.transpose(pred_seq_[1,1,:,:], (1, 2, 0)) + 1) / 2.0 * 255.0
+                # data = Image.fromarray(np.uint8(tt))
+                # data.save('./psnr_gen/psnr:{now_epoch}.png'.format(now_epoch = epoch))
                 
-                validate_seq_ = np.array(validate_seq.cpu().numpy())
-                tt = (np.transpose(validate_seq_[1,1,:,:], (1, 2, 0)) + 1) / 2.0 * 255.0
-                data = Image.fromarray(np.uint8(tt))
-                data.save('./psnr_gen/psnr:{now_epoch}_gt.png'.format(now_epoch = epoch))
-
+                # validate_seq_ = np.array(validate_seq.cpu().numpy())
+                # tt = (np.transpose(validate_seq_[1,1,:,:], (1, 2, 0)) + 1) / 2.0 * 255.0
+                # data = Image.fromarray(np.uint8(tt))
+                # data.save('./psnr_gen/psnr:{now_epoch}_gt.png'.format(now_epoch = epoch))
+                #print('validate_seq', validate_seq[args.n_past:].dtype, validate_seq[args.n_past:].shape)
                 
-                _, _, psnr = finn_eval_seq(validate_seq[args.n_past:], pred_seq[args.n_past:])
+                _, _, psnr = finn_eval_seq(validate_seq[:,args.n_past:], pred_seq[:])
                 psnr_list.append(psnr)
-                
-            ave_psnr = np.mean(np.concatenate(psnr))
 
+
+            ave_psnr = np.mean(np.concatenate(psnr))
+            PSNR_plot.append(ave_psnr)
 
             with open('./{}/train_record.txt'.format(args.log_dir), 'a') as train_record:
                 train_record.write(('====================== validate psnr = {:.5f} ========================\n'.format(ave_psnr)))
@@ -350,17 +388,18 @@ def main():
                     'last_epoch': epoch},
                     '%s/model.pth' % args.log_dir)
 
-        if epoch % 5 == 0:
-            try:
-                validate_seq, validate_cond = next(validate_iterator)
-            except StopIteration:
-                validate_iterator = iter(validate_loader)
-                validate_seq, validate_cond = next(validate_iterator)
-            validate_seq, validate_cond = validate_seq.type(torch.FloatTensor),validate_cond.type(torch.FloatTensor)
-            validate_seq, validate_cond = validate_seq.to(device),validate_cond.to(device)
-
+        # if epoch % 5 == 0:
+        #     try:
+        #         validate_seq, validate_cond = next(validate_iterator)
+        #     except StopIteration:
+        #         validate_iterator = iter(validate_loader)
+        #         validate_seq, validate_cond = next(validate_iterator)
+        #     validate_seq, validate_cond = validate_seq.type(torch.FloatTensor),validate_cond.type(torch.FloatTensor)
+        #     validate_seq, validate_cond = validate_seq.to(device),validate_cond.to(device)
             #plot_pred(validate_seq, validate_cond, modules, epoch, args)
             #plot_rec(validate_seq, validate_cond, modules, epoch, args)
+        if epoch % 20 == 0 and epoch > 2:
+            plot_result(KLD_plot, MSE_plot, LOSS_plot, PSNR_plot, BETA_plot, TFR_plot, epoch, args)
 
 if __name__ == '__main__':
     main()
