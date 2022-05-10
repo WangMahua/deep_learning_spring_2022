@@ -32,12 +32,12 @@ def parse_args():
     parser.add_argument('--data_root', default='./data/processed_data', help='root directory for data')
     parser.add_argument('--optimizer', default='adam', help='optimizer to train with')
     parser.add_argument('--niter', type=int, default=300, help='number of epochs to train for')
-    parser.add_argument('--epoch_size', type=int, default=600, help='epoch size')
+    parser.add_argument('--epoch_size', type=int, default=300, help='epoch size')
     parser.add_argument('--tfr', type=float, default=1.0, help='teacher forcing ratio (0 ~ 1)')
     parser.add_argument('--tfr_start_decay_epoch', type=int, default=50, help='The epoch that teacher forcing ratio become decreasing')
     parser.add_argument('--tfr_decay_step', type=float, default=0.005, help='The decay step size of teacher forcing ratio (0 ~ 1)')
     parser.add_argument('--tfr_lower_bound', type=float, default=0.0, help='The lower bound of teacher forcing ratio for scheduling teacher forcing ratio (0 ~ 1)')
-    parser.add_argument('--kl_anneal_cyclical', default=True, action='store_true', help='use cyclical mode')
+    parser.add_argument('--kl_anneal_cyclical', default=False, action='store_true', help='use cyclical mode')
     parser.add_argument('--kl_anneal_ratio', type=float, default=2, help='The decay ratio of kl annealing')
     parser.add_argument('--kl_anneal_cycle', type=int, default=3, help='The number of cycle for kl annealing (if use cyclical mode)')
     parser.add_argument('--seed', default=1, type=int, help='manual seed')
@@ -137,16 +137,24 @@ class kl_annealing():
 
 def plot_result(KLD, MSE, LOSS, PSNR, BETA, TFR, epoch, args):
 
+    with open('./plot_record.txt', 'w') as result:
+                    result.write('kld: {}\n'.format(KLD))
+                    result.write('\nmse: {}\n'.format(MSE))
+                    result.write('\nloss: {}\n'.format(LOSS))
+                    result.write('\npsnr: {}\n'.format(PSNR))
+                    result.write('\nbeta: {}\n'.format(BETA))
+                    result.write('\ntfr: {}\n'.format(TFR))
+
     fig = plt.figure()
     ratio = plt.subplot()
     value = ratio.twinx()
 
-    KLD = np.array(KLD)
-    KLD = np.where(KLD>1,1,KLD)
-    MSE = np.array(MSE)
-    MSE = np.where(MSE>1,1,MSE)
-    LOSS = np.array(LOSS)
-    LOSS = np.where(LOSS>1,1,LOSS)
+    # KLD = np.array(KLD)
+    # KLD = np.where(KLD>1,1,KLD)
+    # MSE = np.array(MSE)
+    # MSE = np.where(MSE>1,1,MSE)
+    # LOSS = np.array(LOSS)
+    # LOSS = np.where(LOSS>1,1,LOSS)
 
     l1, = ratio.plot(BETA, color='red', linestyle='dashed')
 
@@ -160,21 +168,14 @@ def plot_result(KLD, MSE, LOSS, PSNR, BETA, TFR, epoch, args):
 
     x_sparse = np.linspace(0, epoch, np.size(PSNR))
     l6 = value.scatter(x_sparse, PSNR, color='yellow')
-
-    with open('./plot_record.txt', 'w') as result:
-                    result.write('kld: {}\n'.format(KLD))
-                    result.write('\nmse: {}\n'.format(MSE))
-                    result.write('\nloss: {}\n'.format(LOSS))
-                    result.write('\npsnr: {}\n'.format(PSNR))
-                    result.write('\nbeta: {}\n'.format(BETA))
-                    result.write('\ntfr: {}\n'.format(TFR))
-
+    ratio.set_ylim([0.0, 1.05])
     ratio.set_xlabel('Iterations')
     ratio.set_ylabel("ratio/weight")
     value.set_ylabel('Loss')
     plt.title("Training loss / ratio curve")
     plt.legend([l1, l2, l3, l4, l5, l6], ["kl_beta", "tfr", "KLD", "mse", "loss", "PSNR"])
-    plt.savefig('plot_{a}.png'.format(a = epoch))
+    os.makedirs('%s/plot/' % args.log_dir, exist_ok=True)
+    plt.savefig('./{b}/plot/plot_{a}.png'.format(a = epoch,b=args.log_dir))
 
 
 def main():
@@ -204,7 +205,7 @@ def main():
         start_epoch = saved_model['last_epoch']
     else:
         name = 'rnn_size=%d-predictor-posterior-rnn_layers=%d-%d-n_past=%d-n_future=%d-lr=%.4f-g_dim=%d-z_dim=%d-last_frame_skip=%s-beta=%.7f-niter=%d-epoch_size=%d'\
-            % (args.rnn_size, args.predictor_rnn_layers, args.posterior_rnn_layers, args.n_past, args.n_future, args.lr, args.g_dim, args.z_dim, args.last_frame_skip, args.beta,args.niter,args.niter)
+            % (args.rnn_size, args.predictor_rnn_layers, args.posterior_rnn_layers, args.n_past, args.n_future, args.lr, args.g_dim, args.z_dim, args.last_frame_skip, args.beta,args.niter,args.epoch_size)
         text = "-cyclical" if args.kl_anneal_cyclical else "-monotonic"
         name = name + text
         args.log_dir = '%s/%s' % (args.log_dir, name)
@@ -398,7 +399,7 @@ def main():
         #     validate_seq, validate_cond = validate_seq.to(device),validate_cond.to(device)
             #plot_pred(validate_seq, validate_cond, modules, epoch, args)
             #plot_rec(validate_seq, validate_cond, modules, epoch, args)
-        if epoch % 20 == 0 and epoch > 2:
+        if (epoch % 20 == 0 and epoch > 2) or epoch==(start_epoch + niter-1):
             plot_result(KLD_plot, MSE_plot, LOSS_plot, PSNR_plot, BETA_plot, TFR_plot, epoch, args)
 
 if __name__ == '__main__':
