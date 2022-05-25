@@ -18,7 +18,7 @@ from PIL import Image
 from dataset import bair_robot_pushing_dataset
 from models.lstm import gaussian_lstm, lstm
 from models.vgg_64 import vgg_decoder, vgg_encoder
-from utils_lp import init_weights, kl_criterion, eval_seq, plot_rec,plot_pred,pred,finn_eval_seq,mse_metric
+from utils import init_weights, kl_criterion, eval_seq, plot_rec,plot_pred,pred,finn_eval_seq,mse_metric
 
 torch.backends.cudnn.benchmark = True
 
@@ -26,9 +26,9 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--lr', default=0.001, type=float, help='learning rate')
     parser.add_argument('--beta1', default=0.9, type=float, help='momentum term for adam')
-    parser.add_argument('--batch_size', default=9, type=int, help='batch size')
+    parser.add_argument('--batch_size', default=1, type=int, help='batch size')
     parser.add_argument('--log_dir', default='./logs/lp', help='base directory to save logs')
-    parser.add_argument('--model_dir', default='', help='base directory to save logs')
+    parser.add_argument('--model_dir', default='./logs/lp/rnn_size=256-predictor-posterior-rnn_layers=2-1-n_past=2-n_future=10-lr=0.0010-g_dim=128-z_dim=64-last_frame_skip=False-beta=0.0001000-niter=300-epoch_size=300-cyclical', help='base directory to save logs')
     parser.add_argument('--data_root', default='./data/processed_data', help='root directory for data')
     parser.add_argument('--optimizer', default='adam', help='optimizer to train with')
     parser.add_argument('--niter', type=int, default=300, help='number of epochs to train for')
@@ -37,7 +37,7 @@ def parse_args():
     parser.add_argument('--tfr_start_decay_epoch', type=int, default=50, help='The epoch that teacher forcing ratio become decreasing')
     parser.add_argument('--tfr_decay_step', type=float, default=0.005, help='The decay step size of teacher forcing ratio (0 ~ 1)')
     parser.add_argument('--tfr_lower_bound', type=float, default=0.0, help='The lower bound of teacher forcing ratio for scheduling teacher forcing ratio (0 ~ 1)')
-    parser.add_argument('--kl_anneal_cyclical', default=True, action='store_true', help='use cyclical mode')
+    parser.add_argument('--kl_anneal_cyclical', default=False, action='store_true', help='use cyclical mode')
     parser.add_argument('--kl_anneal_ratio', type=float, default=2, help='The decay ratio of kl annealing')
     parser.add_argument('--kl_anneal_cycle', type=int, default=3, help='The number of cycle for kl annealing (if use cyclical mode)')
     parser.add_argument('--seed', default=1, type=int, help='manual seed')
@@ -45,7 +45,6 @@ def parse_args():
     parser.add_argument('--n_future', type=int, default=10, help='number of frames to predict')
     parser.add_argument('--n_eval', type=int, default=12, help='number of frames to predict at eval time')
     parser.add_argument('--rnn_size', type=int, default=256, help='dimensionality of hidden layer')
-    parser.add_argument('--prior_rnn_layers', type=int, default=1, help='number of layers')
     parser.add_argument('--posterior_rnn_layers', type=int, default=1, help='number of layers')
     parser.add_argument('--predictor_rnn_layers', type=int, default=2, help='number of layers')
     parser.add_argument('--z_dim', type=int, default=64, help='dimensionality of z_t')
@@ -66,12 +65,10 @@ def train(x, cond, modules, optimizer, kl_anneal, args):
     modules['posterior'].zero_grad()
     modules['encoder'].zero_grad()
     modules['decoder'].zero_grad()
-    modules['prior'].zero_grad()
 
     # initialize the hidden state.
     modules['frame_predictor'].hidden = modules['frame_predictor'].init_hidden()
     modules['posterior'].hidden = modules['posterior'].init_hidden()
-    modules['prior'].hidden = modules['prior'].init_hidden()
     mse = 0
     kld = 0
     use_teacher_forcing = True if random.random() < args.tfr else False
@@ -95,8 +92,7 @@ def train(x, cond, modules, optimizer, kl_anneal, args):
 
         c = cond[:, i, :].float()
 
-        z_t, mu, logvar = modules['posterior'](h_target)        
-        _, mu_p, logvar_p = modules['prior'](h)
+        z_t, mu, logvar = modules['posterior'](h_target)
 
         if use_teacher_forcing:
             h_pred = modules['frame_predictor'](torch.cat([h, z_t, c], 1))
@@ -105,7 +101,7 @@ def train(x, cond, modules, optimizer, kl_anneal, args):
             
         x_pred = modules['decoder']([h_pred, skip])
         mse += mse_criterion(x_pred, x[:,i])
-        kld += kl_criterion(mu, logvar, mu_p, logvar_p, args)
+        kld += kl_criterion(mu, logvar,args)
 
     beta = kl_anneal.get_beta()
     loss = mse + kld * beta
@@ -141,7 +137,7 @@ class kl_annealing():
 
 def plot_result(KLD, MSE, LOSS, PSNR, BETA, TFR, epoch, args):
 
-    with open('./{}/plot_record.txt'.format(args.log_dir), 'w') as result:
+    with open('./plot_record.txt', 'w') as result:
                     result.write('kld: {}\n'.format(KLD))
                     result.write('\nmse: {}\n'.format(MSE))
                     result.write('\nloss: {}\n'.format(LOSS))
@@ -173,6 +169,25 @@ def plot_result(KLD, MSE, LOSS, PSNR, BETA, TFR, epoch, args):
     plt.legend([l1, l2, l3, l4, l5, l6], ["kl_beta", "tfr", "KLD", "mse", "loss", "PSNR"])
     os.makedirs('%s/plot/' % args.log_dir, exist_ok=True)
     plt.savefig('./{b}/plot/plot_{a}.png'.format(a = epoch,b=args.log_dir))
+
+def make_gif(test,pred,best_psnr_num,args):
+    test_seq_ = np.array(test.cpu().numpy())
+    pred_seq_ = np.array(pred)
+    best_psnr_num = 1
+    os.makedirs('%s/plot/' % args.log_dir, exist_ok=True)
+    for i in range(args.n_past+args.n_future):
+        if i <args.n_past:
+            tt = (np.transpose(test_seq_[best_psnr_num,i,:,:], (1, 2, 0)) + 1) / 2.0 * 255.0
+            data = Image.fromarray(np.uint8(tt))
+            data.save('{log_dir}/plot/{seq}_gt.png'.format(log_dir=args.log_dir,seq = i))
+            data.save('{log_dir}/plot/{seq}_pred.png'.format(log_dir=args.log_dir,seq = i))
+        else :
+            tt = (np.transpose(test_seq_[best_psnr_num,i,:,:], (1, 2, 0)) + 1) / 2.0 * 255.0
+            data = Image.fromarray(np.uint8(tt))
+            pp = (np.transpose(pred_seq_[best_psnr_num,i-args.n_past,:,:], (1, 2, 0)) + 1) / 2.0 * 255.0
+            data2 = Image.fromarray(np.uint8(pp))
+            data.save('{log_dir}/plot/{seq}_gt.png'.format(log_dir=args.log_dir,seq = i))
+            data2.save('{log_dir}/plot/{seq}_pred.png'.format(log_dir=args.log_dir,seq = i))    
 
 
 def main():
@@ -230,15 +245,12 @@ def main():
     if args.model_dir != '':
         frame_predictor = saved_model['frame_predictor']
         posterior = saved_model['posterior']
-        prior = saved_model['prior']
     else:
         frame_predictor = lstm(args.g_dim+args.z_dim+args.c_dim, args.g_dim, args.rnn_size, args.predictor_rnn_layers, args.batch_size, device)
         posterior = gaussian_lstm(args.g_dim, args.z_dim, args.rnn_size, args.posterior_rnn_layers, args.batch_size, device)
-        prior = gaussian_lstm(args.g_dim, args.z_dim, args.rnn_size, args.prior_rnn_layers, args.batch_size, device)
         frame_predictor.apply(init_weights)
         posterior.apply(init_weights)
-        prior.apply(init_weights) 
-
+            
     if args.model_dir != '':
         decoder = saved_model['decoder']
         encoder = saved_model['encoder']
@@ -253,11 +265,11 @@ def main():
     posterior.to(device)
     encoder.to(device)
     decoder.to(device)
-    prior.to(device)
 
     # --------- load a dataset ------------------------------------
     train_data = bair_robot_pushing_dataset(args, 'train')
     validate_data = bair_robot_pushing_dataset(args, 'validate')
+    test_data = bair_robot_pushing_dataset(args, 'test')
     train_loader = DataLoader(train_data,
                             num_workers=args.num_workers,
                             batch_size=args.batch_size,
@@ -274,6 +286,15 @@ def main():
                             pin_memory=True)
 
     validate_iterator = iter(validate_loader)
+
+    test_loader = DataLoader(test_data,
+                            num_workers=args.num_workers,
+                            batch_size=args.batch_size,
+                            shuffle=True,
+                            drop_last=True,
+                            pin_memory=True)
+
+    test_iterator = iter(test_loader)
 
     # ---------------- optimizers ----------------
     if args.optimizer == 'adam':
@@ -294,108 +315,44 @@ def main():
         'posterior': posterior,
         'encoder': encoder,
         'decoder': decoder,
-        'prior': prior,
     }
     # --------- training loop ------------------------------------
-
-    progress = tqdm(total=args.niter)
-    best_val_psnr = 0
-    for epoch in range(start_epoch, start_epoch + niter):
-        frame_predictor.train()
-        posterior.train()
-        encoder.train()
-        decoder.train()
-        prior.train()
-
-        epoch_loss = 0
-        epoch_mse = 0
-        epoch_kld = 0
-
-        for epoch_ in range(args.epoch_size):
-            try:
-                seq, cond = next(train_iterator)
-            except StopIteration:
-                train_iterator = iter(train_loader)
-                seq, cond = next(train_iterator)
-
-            seq, cond = seq.type(torch.FloatTensor),cond.type(torch.FloatTensor)
-            seq, cond = seq.to(device),cond.to(device)
-
-            loss, mse, kld = train(seq, cond, modules, optimizer, kl_anneal, args)
-            epoch_loss += loss
-            epoch_mse += mse
-            epoch_kld += kld
+    psnr_list = []
+    seq, cond =None,None
+    epoch_num = 0
+    epoch_num = 0
+    max_psnr = 0
+    best_test_seq = []
+    best_pred_seq = []
+    best_psnr_num = 0
+    for _ in range(len(test_data) // args.batch_size):
         
-        kl_anneal.update()
-        KLD_plot.append(kld)
-        MSE_plot.append(mse)
-        LOSS_plot.append(loss)
-        BETA_plot.append(kl_anneal.get_beta())
-        TFR_plot.append(args.tfr)
-
-        if epoch >= args.tfr_start_decay_epoch and args.tfr>=args.tfr_lower_bound:
-            args.tfr = args.tfr - args.tfr_decay_step
-
-        progress.update(1)
-        with open('./{}/train_record.txt'.format(args.log_dir), 'a') as train_record:
-            train_record.write(('[epoch: %02d] loss: %.5f | mse loss: %.5f | kld loss: %.5f\n' % (epoch, epoch_loss  / args.epoch_size, epoch_mse / args.epoch_size, epoch_kld / args.epoch_size)))
+        try:
+            test_seq, test_cond = next(test_iterator)
+        except StopIteration:
+            test_iterator = iter(test_loader)
+            test_seq, test_cond = next(test_iterator)
         
-        frame_predictor.eval()
-        encoder.eval()
-        decoder.eval()
-        posterior.eval()
-        prior.eval()
+        test_seq, test_cond = test_seq.type(torch.FloatTensor),test_cond.type(torch.FloatTensor)
+        test_seq, test_cond = test_seq.to(device),test_cond.to(device)
 
-        if epoch % 5 == 0:
-            psnr_list = []
-            for _ in range(len(validate_data) // args.batch_size):
-                try:
-                    validate_seq, validate_cond = next(validate_iterator)
-                except StopIteration:
-                    validate_iterator = iter(validate_loader)
-                    validate_seq, validate_cond = next(validate_iterator)
+        pred_seq = pred(test_seq, test_cond, modules, args, device)
+        
+        _, _, psnr = finn_eval_seq(test_seq[:,args.n_past:], pred_seq[:])
+        psnr_list.append(psnr)
+
+        ave_psnr = np.mean(np.concatenate(psnr))
+
+        with open('./{}/test_record.txt'.format(args.log_dir), 'a') as train_record:
+            train_record.write(('test trial : %d === test psnr = %.5f \n'%(epoch_num,ave_psnr)))
+        epoch_num+=1
+        if ave_psnr > max_psnr :
+            best_test_seq = test_seq
+            best_pred_seq = pred_seq
+        
+    make_gif(best_test_seq,best_pred_seq,best_psnr_num,args)
+
                 
-                validate_seq, validate_cond = validate_seq.type(torch.FloatTensor),validate_cond.type(torch.FloatTensor)
-                validate_seq, validate_cond = validate_seq.to(device),validate_cond.to(device)
-
-                pred_seq = pred(validate_seq, validate_cond, modules, args, device)
-                
-                # pred_seq_ = np.array(pred_seq)
-                # tt = (np.transpose(pred_seq_[1,1,:,:], (1, 2, 0)) + 1) / 2.0 * 255.0
-                # data = Image.fromarray(np.uint8(tt))
-                # data.save('./psnr_gen/psnr:{now_epoch}.png'.format(now_epoch = epoch))
-                
-                # validate_seq_ = np.array(validate_seq.cpu().numpy())
-                # tt = (np.transpose(validate_seq_[1,1,:,:], (1, 2, 0)) + 1) / 2.0 * 255.0
-                # data = Image.fromarray(np.uint8(tt))
-                # data.save('./psnr_gen/psnr:{now_epoch}_gt.png'.format(now_epoch = epoch))
-                #print('validate_seq', validate_seq[args.n_past:].dtype, validate_seq[args.n_past:].shape)
-                
-                _, _, psnr = finn_eval_seq(validate_seq[:,args.n_past:], pred_seq[:])
-                psnr_list.append(psnr)
-
-
-            ave_psnr = np.mean(np.concatenate(psnr))
-            PSNR_plot.append(ave_psnr)
-
-            with open('./{}/train_record.txt'.format(args.log_dir), 'a') as train_record:
-                train_record.write(('====================== validate psnr = {:.5f} ========================\n'.format(ave_psnr)))
-
-            if ave_psnr > best_val_psnr:
-                best_val_psnr = ave_psnr
-                # save the model
-                torch.save({
-                    'encoder': encoder,
-                    'decoder': decoder,
-                    'frame_predictor': frame_predictor,
-                    'posterior': posterior,
-                    'args': args,
-                    'last_epoch': epoch},
-                    '%s/model.pth' % args.log_dir)
-
-        if (epoch % 20 == 0 and epoch > 2) or epoch==(start_epoch + niter-1):
-            plot_result(KLD_plot, MSE_plot, LOSS_plot, PSNR_plot, BETA_plot, TFR_plot, epoch, args)
-
 if __name__ == '__main__':
     main()
         

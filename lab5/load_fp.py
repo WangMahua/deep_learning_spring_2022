@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 import matplotlib.pyplot as plt
+import glob
 from PIL import Image
 
 from dataset import bair_robot_pushing_dataset
@@ -26,7 +27,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--lr', default=0.001, type=float, help='learning rate')
     parser.add_argument('--beta1', default=0.9, type=float, help='momentum term for adam')
-    parser.add_argument('--batch_size', default=9, type=int, help='batch size')
+    parser.add_argument('--batch_size', default=1, type=int, help='batch size')
     parser.add_argument('--log_dir', default='./logs/fp', help='base directory to save logs')
     parser.add_argument('--model_dir', default='./logs/fp/rnn_size=256-predictor-posterior-rnn_layers=2-1-n_past=2-n_future=10-lr=0.0010-g_dim=128-z_dim=64-last_frame_skip=False-beta=0.0001000-niter=300-epoch_size=300-cyclical', help='base directory to save logs')
     parser.add_argument('--data_root', default='./data/processed_data', help='root directory for data')
@@ -170,6 +171,25 @@ def plot_result(KLD, MSE, LOSS, PSNR, BETA, TFR, epoch, args):
     os.makedirs('%s/plot/' % args.log_dir, exist_ok=True)
     plt.savefig('./{b}/plot/plot_{a}.png'.format(a = epoch,b=args.log_dir))
 
+def make_gif(test,pred,best_psnr_num,args):
+    test_seq_ = np.array(test.cpu().numpy())
+    pred_seq_ = np.array(pred)
+    best_psnr_num = 1
+    os.makedirs('%s/plot/' % args.log_dir, exist_ok=True)
+    for i in range(args.n_past+args.n_future):
+        if i <args.n_past:
+            tt = (np.transpose(test_seq_[best_psnr_num,i,:,:], (1, 2, 0)) + 1) / 2.0 * 255.0
+            data = Image.fromarray(np.uint8(tt))
+            data.save('{log_dir}/plot/{seq}_gt.png'.format(log_dir=args.log_dir,seq = i))
+            data.save('{log_dir}/plot/{seq}_pred.png'.format(log_dir=args.log_dir,seq = i))
+        else :
+            tt = (np.transpose(test_seq_[best_psnr_num,i,:,:], (1, 2, 0)) + 1) / 2.0 * 255.0
+            data = Image.fromarray(np.uint8(tt))
+            pp = (np.transpose(pred_seq_[best_psnr_num,i-args.n_past,:,:], (1, 2, 0)) + 1) / 2.0 * 255.0
+            data2 = Image.fromarray(np.uint8(pp))
+            data.save('{log_dir}/plot/{seq}_gt.png'.format(log_dir=args.log_dir,seq = i))
+            data2.save('{log_dir}/plot/{seq}_pred.png'.format(log_dir=args.log_dir,seq = i))    
+
 
 def main():
     KLD_plot, MSE_plot, LOSS_plot, PSNR_plot, BETA_plot, TFR_plot =[],[],[],[],[],[]
@@ -300,7 +320,14 @@ def main():
     # --------- training loop ------------------------------------
     psnr_list = []
     seq, cond =None,None
+    epoch_num = 0
+    max_psnr = 0
+    best_test_seq = []
+    best_pred_seq = []
+    best_psnr_num = 0
+
     for _ in range(len(test_data) // args.batch_size):
+        
         try:
             test_seq, test_cond = next(test_iterator)
         except StopIteration:
@@ -311,15 +338,24 @@ def main():
         test_seq, test_cond = test_seq.to(device),test_cond.to(device)
 
         pred_seq = pred(test_seq, test_cond, modules, args, device)
-        
+        # plot 
+
+
         _, _, psnr = finn_eval_seq(test_seq[:,args.n_past:], pred_seq[:])
-        psnr_list.append(psnr)
 
         ave_psnr = np.mean(np.concatenate(psnr))
-        PSNR_plot.append(ave_psnr)
 
         with open('./{}/test_record.txt'.format(args.log_dir), 'a') as train_record:
-            train_record.write(('====================== test psnr = {:.5f} ========================\n'.format(ave_psnr)))
+            train_record.write(('test trial : %d === test psnr = %.5f \n'%(epoch_num,ave_psnr)))
+        epoch_num+=1
+        if ave_psnr > max_psnr :
+            best_test_seq = test_seq
+            best_pred_seq = pred_seq
+            
+
+
+    make_gif(best_test_seq,best_pred_seq,best_psnr_num,args)
+
                 
 if __name__ == '__main__':
     main()
